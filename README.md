@@ -19,7 +19,8 @@
 ### 🤔 What's New?
 
 - Replaced `Block-Sparse-Attention` with `Sparse_SageAttention` to avoid building complex cuda kernels.  
-- With the new `tile_dit` method, you can even output 1080P video on 8GB of VRAM.  
+- With the new `tile_dit` method, you can even output 1080P video on 8GB of VRAM.   
+- Support copying audio tracks to output files (powered by FFmpeg). 
 - Introduced Blackwell GPU support for FlashVSR.  
 
 ---

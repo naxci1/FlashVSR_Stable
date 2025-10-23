@@ -17,6 +17,8 @@ parser.add_argument("--color-fix", action="store_true", help="Correct output vid
 parser.add_argument("--seed", type=int, default=0, help="Random Seed, default=0")
 parser.add_argument("-t", "--dtype", type=str, default="bf16", choices=["fp16", "bf16"], help="Data type for processing, default=bf16")
 parser.add_argument("-d", "--device", type=str, default="auto", help="Device to run FlashVSR")
+parser.add_argument("-f", "--fps", type=int, default=0, help="Output frame rate (0=same as input), default=0")
+parser.add_argument("-q", "--quality", type=int, default=6, help="Output video quality, default=6")
 parser.add_argument("output_folder", type=str, help="Path to save output video")
 args = parser.parse_args()
 
@@ -24,7 +26,9 @@ import os
 import re
 import math
 import torch
+import shutil
 import imageio
+import ffmpeg
 import numpy as np
 import torch.nn.functional as F
 
@@ -56,6 +60,17 @@ def model_downlod(model_name="JunhaoZhuang/FlashVSR"):
         log(f"Downloading model '{model_name}' from huggingface...", message_type='info')
         snapshot_download(repo_id=model_name, local_dir=model_dir, local_dir_use_symlinks=False, resume_download=True)
 
+def is_ffmpeg_available():
+    ffmpeg_path = shutil.which('ffmpeg')
+    if ffmpeg_path is None:
+        log("[FlashVSR] FFmpeg not found!", message_type="warning")
+        log("Please install FFmpeg and ensure it is in your system's PATH.")
+        log("- Windows: Download from https://www.ffmpeg.org/download.html and add the 'bin' directory to PATH.")
+        log("- macOS (via Homebrew): brew install ffmpeg")
+        log("- Linux (Ubuntu/Debian): sudo apt-get install ffmpeg")
+        return False
+    return True
+
 def tensor2video(frames: torch.Tensor):
     video_squeezed = frames.squeeze(0)
     video_permuted = rearrange(video_squeezed, "C F H W -> F H W C")
@@ -82,17 +97,50 @@ def largest_8n1_leq(n):  # 8n+1
 def is_video(path): 
     return os.path.isfile(path) and path.lower().endswith(('.mp4','.mov','.avi','.mkv'))
 
-def pil_to_tensor_neg1_1(img: Image.Image, dtype=torch.bfloat16, device='cuda'):
-    t = torch.from_numpy(np.asarray(img, np.uint8)).to(device=device, dtype=torch.float32)  # HWC
-    t = t.permute(2,0,1) / 255.0 * 2.0 - 1.0                                              # CHW in [-1,1]
-    return t.to(dtype)
-
 def save_video(frames, save_path, fps=30, quality=5):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     w = imageio.get_writer(save_path, fps=fps, quality=quality)
-    for f in tqdm(frames, desc=f"Saving {os.path.basename(save_path)}"):
+    for f in tqdm(frames, desc=f"[FlashVSR] Saving video"):
         w.append_data(np.array(f))
     w.close()
+
+def merge_video_with_audio(video_path, audio_source_path, output_path):
+    if os.path.isdir(video_path):
+        os.rename(video_path, output_path)
+        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+        return
+    
+    if not is_ffmpeg_available():
+        os.rename(video_path, output_path)
+        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+        return
+    
+    try:
+        probe = ffmpeg.probe(audio_source_path)
+        audio_streams = [s for s in probe['streams'] if s['codec_type'] == 'audio']
+        if not audio_streams:
+            log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+            os.rename(video_path, output_path)
+            return
+        
+        input_video = ffmpeg.input(video_path)['v']
+        input_audio = ffmpeg.input(audio_source_path)['a']
+        output_ffmpeg = ffmpeg.output(
+            input_video, input_audio, output_path,
+            vcodec='copy', acodec='copy'
+        ).run(overwrite_output=True, quiet=True)
+        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+    except ffmpeg.Error as e:
+        os.rename(video_path, output_path)
+        print("[ERROR] FFmpeg error during merge:", e.stderr.decode() if e.stderr else "Unknown error")
+        log(f"[FlashVSR] Audio merge failed. A silent video has been saved to '{output_path}'.", message_type='warning')
+        
+    finally:
+        if os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except OSError as e:
+                lgo(f"[FlashVSR] Could not remove temporary file '{video_path}': {e}", message_type='error')
     
 def compute_scaled_and_target_dims(w0: int, h0: int, scale: int = 4, multiple: int = 128):
     if w0 <= 0 or h0 <= 0:
@@ -258,7 +306,7 @@ def init_pipeline(mode, device, dtype):
         raise RuntimeError(f'"TCDecoder.ckpt" does not exist! Please save it to "{model_path}"')
     prompt_path = os.path.join(root, "models", "posi_prompt.pth")
     
-    mm = ModelManager(torch_dtype=torch.bfloat16, device="cpu")
+    mm = ModelManager(torch_dtype=dtype, device="cpu")
     if mode == "full":
         mm.load_models([ckpt_path, vae_path])
         pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
@@ -272,11 +320,11 @@ def init_pipeline(mode, device, dtype):
         mis = pipe.TCDecoder.load_state_dict(torch.load(tcd_path, map_location=device), strict=False)
         pipe.TCDecoder.clean_mem()
         
-    pipe.denoising_model().LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=torch.bfloat16)
+    pipe.denoising_model().LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
     if os.path.exists(lq_path):
         pipe.denoising_model().LQ_proj_in.load_state_dict(torch.load(lq_path, map_location="cpu"), strict=True)
     pipe.denoising_model().LQ_proj_in.to(device)
-    pipe.to(device)
+    pipe.to(device, dtype=dtype)
     pipe.enable_vram_management(num_persistent_param_in_dit=None)
     pipe.init_cross_kv(prompt_path=prompt_path)
     pipe.load_models_to_device(["dit","vae"])
@@ -314,12 +362,12 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
         latent_tiles_cpu = []
         
-        for i, (x1, y1, x2, y2) in enumerate(tqdm(tile_coords, desc="Processing Tiles")):
+        for i, (x1, y1, x2, y2) in enumerate(tile_coords):
             log(f"[FlashVSR] Processing tile {i+1}/{len(tile_coords)}: coords ({x1},{y1}) to ({x2},{y2})", message_type='info')
             input_tile = frames[:, y1:y2, x1:x2, :]
             
             _tile = input_tile.to(_device)
-            LQ_tile, th, tw, F = prepare_input_tensor(_tile, scale=scale, dtype=torch.bfloat16)
+            LQ_tile, th, tw, F = prepare_input_tensor(_tile, scale=scale, dtype=dtype)
             del _tile
             clean_vram()
             
@@ -386,7 +434,10 @@ if __name__ == "__main__":
         args.tile_size, args.overlap, args.unload_dit, dtype, seed=args.seed, device=args.device)
     video = tensor2images(result)
     
+    _fps = args.fps if args.fps != 0 else fps
     name = os.path.basename(args.input.rstrip('/'))
-    os.makedirs(args.output_folder, exist_ok=True)
-    save_video(video, os.path.join(args.output_folder, f"FlashVSR_Full_{name.split('.')[0]}_seed{args.seed}.mp4"), fps=fps, quality=6)
-    log("[FlashVSR] Done.", message_type='info')
+    temp = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}_temp.mp4")
+    final = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}.mp4")
+    save_video(video, temp, fps=_fps, quality=args.quality)
+    merge_video_with_audio(temp, args.input, final)
+    log("[FlashVSR] Done.", message_type='finish')
