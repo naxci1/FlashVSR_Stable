@@ -17,7 +17,7 @@ parser.add_argument("--color-fix", action="store_true", help="Correct output vid
 parser.add_argument("--seed", type=int, default=0, help="Random Seed, default=0")
 parser.add_argument("-t", "--dtype", type=str, default="bf16", choices=["fp16", "bf16"], help="Data type for processing, default=bf16")
 parser.add_argument("-d", "--device", type=str, default="auto", help="Device to run FlashVSR")
-parser.add_argument("-f", "--fps", type=int, default=0, help="Output frame rate (0=same as input), default=0")
+parser.add_argument("-f", "--fps", type=int, default=30, help="Output FPS (for image sequences only), default=30")
 parser.add_argument("-q", "--quality", type=int, default=6, help="Output video quality, default=6")
 parser.add_argument("output_folder", type=str, help="Path to save output video")
 args = parser.parse_args()
@@ -434,7 +434,7 @@ if __name__ == "__main__":
         args.tile_size, args.overlap, args.unload_dit, dtype, seed=args.seed, device=args.device)
     video = tensor2images(result)
     
-    _fps = args.fps if args.fps != 0 else fps
+    _fps = fps if is_video(args.input) else args.fps
     name = os.path.basename(args.input.rstrip('/'))
     temp = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}_temp.mp4")
     final = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}.mp4")
