@@ -7,7 +7,7 @@ import argparse
 parser = argparse.ArgumentParser(description="FlashVSR+: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution.")
 parser.add_argument("-i", "--input", type=str, help="Path to video file or folder of images")
 parser.add_argument("-s", "--scale", type=int, default=4, help="Upscale factor, default=4")
-parser.add_argument("-m", "--mode", type=str, default="tiny", choices=["tiny", "full"], help="The type of pipeline to use, default=tiny")
+parser.add_argument("-m", "--mode", type=str, default="tiny", choices=["tiny", "tiny-long", "full", "full-long"], help="The type of pipeline to use, default=tiny")
 parser.add_argument("--tiled-vae", action="store_true", help="Enable tile decoding")
 parser.add_argument("--tiled-dit", action="store_true", help="Enable tile inference")
 parser.add_argument("--tile-size", type=int, default=256, help="Chunk size of tile inference, default=256")
@@ -21,6 +21,7 @@ parser.add_argument("-f", "--fps", type=int, default=30, help="Output FPS (for i
 parser.add_argument("-q", "--quality", type=int, default=6, help="Output video quality, default=6")
 parser.add_argument("output_folder", type=str, help="Path to save output video")
 args = parser.parse_args()
+print("[FlashVSR] Preparing dependencies......")
 
 import os
 import re
@@ -36,22 +37,24 @@ from PIL import Image
 from tqdm import tqdm
 from einops import rearrange
 from huggingface_hub import snapshot_download
-from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline
+from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRFullLongPipeline, FlashVSRTinyLongPipeline
 from src.models.TCDecoder import build_tcdecoder
 from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj
 
 root = os.path.dirname(os.path.abspath(__file__))
 devices = get_device_list()
 
-def log(message:str, message_type:str='info'):
+def log(message:str, message_type:str="normal"):
     if message_type == 'error':
         message = '\033[1;41m' + message + '\033[m'
     elif message_type == 'warning':
         message = '\033[1;31m' + message + '\033[m'
     elif message_type == 'finish':
         message = '\033[1;32m' + message + '\033[m'
-    else:
+    elif message_type == 'info':
         message = '\033[1;33m' + message + '\033[m'
+    else:
+        message = message
     print(f"{message}")
 
 def model_downlod(model_name="JunhaoZhuang/FlashVSR"):
@@ -77,11 +80,6 @@ def tensor2video(frames: torch.Tensor):
     video_final = (video_permuted.float() + 1.0) / 2.0
     return video_final
 
-def tensor2images(frames: torch.Tensor):
-    frames_np = (frames.cpu().float() * 255.0).clip(0, 255).numpy().astype(np.uint8)
-    image_list = [Image.fromarray(frame) for frame in frames_np]
-    return image_list
-
 def natural_key(name: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'([0-9]+)', os.path.basename(name))]
 
@@ -99,48 +97,48 @@ def is_video(path):
 
 def save_video(frames, save_path, fps=30, quality=5):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    frames_np = (frames.cpu().float() * 255.0).clip(0, 255).numpy().astype(np.uint8)
     w = imageio.get_writer(save_path, fps=fps, quality=quality)
-    for f in tqdm(frames, desc=f"[FlashVSR] Saving video"):
-        w.append_data(np.array(f))
+    for frame_np in tqdm(frames_np, desc=f"[FlashVSR] Saving video"):
+        w.append_data(frame_np)
     w.close()
 
-def merge_video_with_audio(video_path, audio_source_path, output_path):
-    if os.path.isdir(video_path):
-        os.rename(video_path, output_path)
-        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+def merge_video_with_audio(video_path, audio_source_path):
+    temp = video_path+"temp.mp4"
+    
+    if os.path.isdir(audio_source_path):
+        log(f"[FlashVSR] Output video saved to '{video_path}'", message_type='info')
         return
     
     if not is_ffmpeg_available():
-        os.rename(video_path, output_path)
-        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+        log(f"[FlashVSR] Output video saved to '{video_path}'", message_type='info')
         return
     
     try:
         probe = ffmpeg.probe(audio_source_path)
         audio_streams = [s for s in probe['streams'] if s['codec_type'] == 'audio']
         if not audio_streams:
-            log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
-            os.rename(video_path, output_path)
+            log(f"[FlashVSR] Output video saved to '{video_path}'", message_type='info')
             return
-        
-        input_video = ffmpeg.input(video_path)['v']
+        log("[FlashVSR] Copying audio tracks...")
+        os.rename(video_path, temp)
+        input_video = ffmpeg.input(temp)['v']
         input_audio = ffmpeg.input(audio_source_path)['a']
         output_ffmpeg = ffmpeg.output(
-            input_video, input_audio, output_path,
+            input_video, input_audio, video_path,
             vcodec='copy', acodec='copy'
         ).run(overwrite_output=True, quiet=True)
-        log(f"[FlashVSR] Output video saved to '{output_path}'", message_type='info')
+        log(f"[FlashVSR] Output video saved to '{video_path}'", message_type='info')
     except ffmpeg.Error as e:
-        os.rename(video_path, output_path)
         print("[ERROR] FFmpeg error during merge:", e.stderr.decode() if e.stderr else "Unknown error")
-        log(f"[FlashVSR] Audio merge failed. A silent video has been saved to '{output_path}'.", message_type='warning')
+        log(f"[FlashVSR] Audio merge failed. A silent video has been saved to '{video_path}'.", message_type='warning')
         
     finally:
-        if os.path.exists(video_path):
+        if os.path.exists(temp):
             try:
-                os.remove(video_path)
+                os.remove(temp)
             except OSError as e:
-                lgo(f"[FlashVSR] Could not remove temporary file '{video_path}': {e}", message_type='error')
+                lgo(f"[FlashVSR] Could not remove temporary file '{temp}': {e}", message_type='error')
     
 def compute_scaled_and_target_dims(w0: int, h0: int, scale: int = 4, multiple: int = 128):
     if w0 <= 0 or h0 <= 0:
@@ -239,7 +237,7 @@ def prepare_input_tensor(image_tensor: torch.Tensor, scale: int = 4, dtype=torch
         frame_slice = image_tensor[frame_idx]
         tensor_chw = tensor_upscale_then_center_crop(frame_slice, scale=scale, tW=tW, tH=tH)
         tensor_out = tensor_chw * 2.0 - 1.0
-        tensor_out = tensor_out.to(dtype)
+        tensor_out = tensor_out.to('cpu').to(dtype)
         frames.append(tensor_out)
         
     vid_stacked = torch.stack(frames, 0)
@@ -307,14 +305,20 @@ def init_pipeline(mode, device, dtype):
     prompt_path = os.path.join(root, "models", "posi_prompt.pth")
     
     mm = ModelManager(torch_dtype=dtype, device="cpu")
-    if mode == "full":
+    if mode in ["full", "full-long"]:
         mm.load_models([ckpt_path, vae_path])
-        pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
+        if mode == "full":
+            pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
+        else:
+            pipe = FlashVSRFullLongPipeline.from_model_manager(mm, device=device)
         pipe.vae.model.encoder = None
         pipe.vae.model.conv1 = None
     else:
         mm.load_models([ckpt_path])
-        pipe = FlashVSRTinyPipeline.from_model_manager(mm, device=device)
+        if mode == "tiny":
+            pipe = FlashVSRTinyPipeline.from_model_manager(mm, device=device)
+        else:
+            pipe = FlashVSRTinyLongPipeline.from_model_manager(mm, device=device)
         multi_scale_channels = [512, 256, 128, 128]
         pipe.TCDecoder = build_tcdecoder(new_channels=multi_scale_channels, device=device, dtype=dtype, new_latent_channels=16+768)
         mis = pipe.TCDecoder.load_state_dict(torch.load(tcd_path, map_location=device), strict=False)
@@ -343,13 +347,13 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
     if tiled_dit and (tile_overlap > tile_size / 2):
         raise ValueError('The "tile_overlap" must be less than half of "tile_size"!')
     
-    pipe = init_pipeline(mode, _device, dtype)
     frames, fps = prepare_tensors(input, dtype=dtype)
     
     if frames.shape[0] < 21:
         raise ValueError(f"Number of frames must be at least 21, got {frames.shape[0]}")
     
     if tiled_dit:
+        log("[FlashVSR] Preparing frames...")
         N, H, W, C = frames.shape
         num_aligned_frames = largest_8n1_leq(N + 4) - 4
         
@@ -362,12 +366,17 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
         latent_tiles_cpu = []
         
+        pipe = init_pipeline(mode, _device, dtype)
+        
         for i, (x1, y1, x2, y2) in enumerate(tile_coords):
             log(f"[FlashVSR] Processing tile {i+1}/{len(tile_coords)}: coords ({x1},{y1}) to ({x2},{y2})", message_type='info')
             input_tile = frames[:, y1:y2, x1:x2, :]
             
             _tile = input_tile.to(_device)
             LQ_tile, th, tw, F = prepare_input_tensor(_tile, scale=scale, dtype=dtype)
+            if "long" not in mode:
+                LQ_tile = LQ_tile.to(_device)
+                
             del _tile
             clean_vram()
             
@@ -399,19 +408,25 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
         weight_sum_canvas[weight_sum_canvas == 0] = 1.0
         final_output = final_output_canvas / weight_sum_canvas
     else:
-        log(f"[FlashVSR] Processing {frames.shape[0]} frames...", message_type='info')
-        
+        log("[FlashVSR] Preparing frames...")
         _frames = frames.to(_device)
         LQ, th, tw, F = prepare_input_tensor(_frames, scale=scale, dtype=dtype)
+        if "long" not in mode:
+            LQ = LQ.to(_device)
+            
+        del _frames
+        clean_vram()
         
+        pipe = init_pipeline(mode, _device, dtype)
+        log(f"[FlashVSR] Processing {frames.shape[0]} frames...", message_type='info')
         video = pipe(
             prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
             LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
             topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
             color_fix = color_fix, unload_dit=unload_dit
         )
-        
-        final_output = tensor2video(video)
+        log("[FlashVSR] Preparing frames...")
+        final_output = tensor2video(video).to("cpu")
         
         del pipe, video, LQ
         clean_vram()
@@ -432,12 +447,10 @@ if __name__ == "__main__":
     model_downlod()
     result, fps = main(args.input, args.mode, args.scale, args.color_fix, args.tiled_vae, args.tiled_dit,
         args.tile_size, args.overlap, args.unload_dit, dtype, seed=args.seed, device=args.device)
-    video = tensor2images(result)
     
     _fps = fps if is_video(args.input) else args.fps
     name = os.path.basename(args.input.rstrip('/'))
-    temp = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}_temp.mp4")
     final = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}.mp4")
-    save_video(video, temp, fps=_fps, quality=args.quality)
-    merge_video_with_audio(temp, args.input, final)
+    save_video(result, final, fps=_fps, quality=args.quality)
+    merge_video_with_audio(final, args.input)
     log("[FlashVSR] Done.", message_type='finish')

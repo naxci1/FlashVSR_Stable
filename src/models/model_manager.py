@@ -387,9 +387,9 @@ class ModelManager:
             #print(f"No {model_name} models available.")
             return None
         if len(fetched_models) == 1:
-            print(f"Using {model_name} from {fetched_model_paths[0]}.")
+            print(f"Using {model_name} from {fetched_model_paths[0]}")
         else:
-            print(f"More than one {model_name} models are loaded in model manager: {fetched_model_paths}. Using {model_name} from {fetched_model_paths[0]}.")
+            print(f"More than one {model_name} models are loaded in model manager: {fetched_model_paths}. Using {model_name} from {fetched_model_paths[0]}")
         if require_model_path:
             return fetched_models[0], fetched_model_paths[0]
         else:

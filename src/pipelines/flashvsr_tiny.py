@@ -173,7 +173,6 @@ class FlashVSRTinyPipeline(BasePipeline):
     ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║
     ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║
     ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
-                               ⚡FlashVSR+
 """)
 
     def enable_vram_management(self, num_persistent_param_in_dit=None):
