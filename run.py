@@ -7,7 +7,7 @@ import argparse
 parser = argparse.ArgumentParser(description="FlashVSR+: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution.")
 parser.add_argument("-i", "--input", type=str, help="Path to video file or folder of images")
 parser.add_argument("-s", "--scale", type=int, default=4, help="Upscale factor, default=4")
-parser.add_argument("-m", "--mode", type=str, default="tiny", choices=["tiny", "tiny-long", "full", "full-long"], help="The type of pipeline to use, default=tiny")
+parser.add_argument("-m", "--mode", type=str, default="tiny", choices=["tiny", "tiny-long", "full"], help="The type of pipeline to use, default=tiny")
 parser.add_argument("--tiled-vae", action="store_true", help="Enable tile decoding")
 parser.add_argument("--tiled-dit", action="store_true", help="Enable tile inference")
 parser.add_argument("--tile-size", type=int, default=256, help="Chunk size of tile inference, default=256")
@@ -37,7 +37,7 @@ from PIL import Image
 from tqdm import tqdm
 from einops import rearrange
 from huggingface_hub import snapshot_download
-from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRFullLongPipeline, FlashVSRTinyLongPipeline
+from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
 from src.models.TCDecoder import build_tcdecoder
 from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj
 
@@ -305,12 +305,9 @@ def init_pipeline(mode, device, dtype):
     prompt_path = os.path.join(root, "models", "posi_prompt.pth")
     
     mm = ModelManager(torch_dtype=dtype, device="cpu")
-    if mode in ["full", "full-long"]:
+    if mode == "full":
         mm.load_models([ckpt_path, vae_path])
-        if mode == "full":
-            pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
-        else:
-            pipe = FlashVSRFullLongPipeline.from_model_manager(mm, device=device)
+        pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
         pipe.vae.model.encoder = None
         pipe.vae.model.conv1 = None
     else:

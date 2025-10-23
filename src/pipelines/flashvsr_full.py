@@ -366,6 +366,8 @@ class FlashVSRFullPipeline(BasePipeline):
 
         latents_total = []
         self.vae.clear_cache()
+        LQ_pre_idx = 0
+        LQ_cur_idx = 0
         
         if unload_dit and hasattr(self, 'dit') and self.dit is not None:
             current_dit_device = next(iter(self.dit.parameters())).device
@@ -391,6 +393,7 @@ class FlashVSRFullPipeline(BasePipeline):
                         else:
                             for layer_idx in range(len(LQ_latents)):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
+                    LQ_cur_idx = (inner_loop_num-1)*4-3
                     cur_latents = latents[:, :, :6, :, :]
                 else:
                     LQ_latents = None
@@ -406,6 +409,7 @@ class FlashVSRFullPipeline(BasePipeline):
                         else:
                             for layer_idx in range(len(LQ_latents)):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
+                    LQ_cur_idx = cur_process_idx*8+21+(inner_loop_num-2)*4
                     cur_latents = latents[:, :, 4+cur_process_idx*2:6+cur_process_idx*2, :, :]
                 
                 # 推理（无 motion_controller / vace）
@@ -432,6 +436,7 @@ class FlashVSRFullPipeline(BasePipeline):
                 # 更新 latent
                 cur_latents = cur_latents - noise_pred_posi
                 latents_total.append(cur_latents)
+                LQ_pre_idx = LQ_cur_idx
                 
             if unload_dit and hasattr(self, 'dit') and not next(self.dit.parameters()).is_cpu:
                 try:
