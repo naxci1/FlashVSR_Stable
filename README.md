@@ -50,7 +50,11 @@ conda activate flashvsr
 Install project dependencies:
 
 ```bash
-pip install -r requirements.txt
+# for CUDA 12.8
+pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu128
+
+# for CUDA 13.0
+pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu130
 ```
 
 #### 3️⃣ Download Model Weights
