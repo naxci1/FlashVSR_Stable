@@ -166,12 +166,12 @@ class FlashVSRTinyPipeline(BasePipeline):
         self.ColorCorrector = TorchColorCorrectorWavelet(levels=5)
 
         print(r"""
-    ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
-    ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗
-    █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║
-    ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║
-    ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║
-    ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+ ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
+ ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗
+ █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗
+ ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝ 
+ ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝
+ ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 """)
 
     def enable_vram_management(self, num_persistent_param_in_dit=None):
@@ -319,6 +319,7 @@ class FlashVSRTinyPipeline(BasePipeline):
         color_fix = True,
         unload_dit = False,
         skip_vae = False,
+        **kwargs,
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
@@ -326,10 +327,10 @@ class FlashVSRTinyPipeline(BasePipeline):
         # 要求：必须先 init_cross_kv()
         if self.prompt_emb_posi is None or 'context' not in self.prompt_emb_posi:
             raise RuntimeError(
-                "Cross-Attn KV 未初始化。请在调用 __call__ 前先执行：\n"
-                "    pipe.init_cross_kv()\n"
-                "或传入自定义 context：\n"
-                "    pipe.init_cross_kv(context_tensor=your_context_tensor)"
+                "Cross-Attention KV not initialized. Please call __call__ only after:\n"
+                " pipe.init_cross_kv()\n"
+                "Or provide a custom context:\n"
+                " pipe.init_cross_kv(context_tensor=your_context_tensor)"
             )
 
         # 尺寸修正
@@ -375,6 +376,8 @@ class FlashVSRTinyPipeline(BasePipeline):
                     LQ_latents = None
                     inner_loop_num = 7
                     for inner_idx in range(inner_loop_num):
+                        t = LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :]
+
                         cur = self.denoising_model().LQ_proj_in.stream_forward(
                             LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :]
                         ) if LQ_video is not None else None
@@ -403,7 +406,7 @@ class FlashVSRTinyPipeline(BasePipeline):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
                     LQ_cur_idx = cur_process_idx*8+21+(inner_loop_num-2)*4
                     cur_latents = latents[:, :, 4+cur_process_idx*2:6+cur_process_idx*2, :, :]
-                        
+
                 # 推理（无 motion_controller / vace）
                 noise_pred_posi, pre_cache_k, pre_cache_v = model_fn_wan_video(
                     self.dit,

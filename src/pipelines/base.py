@@ -127,4 +127,3 @@ class BasePipeline(torch.nn.Module):
         generator = None if seed is None else torch.Generator(device).manual_seed(seed)
         noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
         return noise
-    

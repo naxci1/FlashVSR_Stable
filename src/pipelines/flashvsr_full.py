@@ -166,12 +166,12 @@ class FlashVSRFullPipeline(BasePipeline):
         self.ColorCorrector = TorchColorCorrectorWavelet(levels=5)
 
         print(r"""
-    ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
-    ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗
-    █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║
-    ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║
-    ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║
-    ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+ ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
+ ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗
+ █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗
+ ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝ 
+ ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝
+ ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 """)
 
     def enable_vram_management(self, num_persistent_param_in_dit=None):
@@ -329,6 +329,7 @@ class FlashVSRFullPipeline(BasePipeline):
         color_fix = True,
         unload_dit = False,
         skip_vae = False,
+        **kwargs,
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
@@ -336,10 +337,10 @@ class FlashVSRFullPipeline(BasePipeline):
         # 要求：必须先 init_cross_kv()
         if self.prompt_emb_posi is None or 'context' not in self.prompt_emb_posi:
             raise RuntimeError(
-                "Cross-Attn KV 未初始化。请在调用 __call__ 前先执行：\n"
-                "    pipe.init_cross_kv()\n"
-                "或传入自定义 context：\n"
-                "    pipe.init_cross_kv(context_tensor=your_context_tensor)"
+                "Cross-Attention KV not initialized. Please call __call__ only after:\n"
+                " pipe.init_cross_kv()\n"
+                "Or provide a custom context:\n"
+                " pipe.init_cross_kv(context_tensor=your_context_tensor)"
             )
 
         if num_frames % 4 != 1:

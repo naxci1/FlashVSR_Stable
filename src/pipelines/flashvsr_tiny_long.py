@@ -10,15 +10,16 @@ import numpy as np
 from einops import rearrange
 from PIL import Image
 from tqdm import tqdm
+import types
+import imageio
 # import pyfiglet
 
 from ..models import ModelManager
-from ..models.utils import clean_vram
+from ..models.utils import clean_vram, FrameStreamBuffer, TensorAsBuffer, tensor_to_imageio_frame
 from ..models.wan_video_dit import WanModel, RMSNorm, sinusoidal_embedding_1d
 from ..models.wan_video_vae import WanVideoVAE, RMS_norm, CausalConv3d, Upsample
 from ..schedulers.flow_match import FlowMatchScheduler
 from .base import BasePipeline
-
 
 # -----------------------------
 # 基础工具：ADAIN 所需的统计量（保留以备需要；管线默认用 wavelet）
@@ -166,12 +167,12 @@ class FlashVSRTinyLongPipeline(BasePipeline):
         self.ColorCorrector = TorchColorCorrectorWavelet(levels=5)
 
         print(r"""
-    ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
-    ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗
-    █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║
-    ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║
-    ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║
-    ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+ ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
+ ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗
+ █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗
+ ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝ 
+ ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝
+ ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 """)
 
     def enable_vram_management(self, num_persistent_param_in_dit=None):
@@ -311,14 +312,17 @@ class FlashVSRTinyLongPipeline(BasePipeline):
         progress_bar_cmd=tqdm,
         progress_bar_st=None,
         LQ_video=None,
+        buffer_size: int = 40,
         is_full_block=False,
         if_buffer=False,
         topk_ratio=2.0,
         kv_ratio=3.0,
         local_range = 9,
         color_fix = True,
-        unload_dit = False,
-        skip_vae = False,
+        fps=30,
+        quality=6,
+        output_path=None,
+        **kwargs,
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
@@ -326,11 +330,20 @@ class FlashVSRTinyLongPipeline(BasePipeline):
         # 要求：必须先 init_cross_kv()
         if self.prompt_emb_posi is None or 'context' not in self.prompt_emb_posi:
             raise RuntimeError(
-                "Cross-Attn KV 未初始化。请在调用 __call__ 前先执行：\n"
-                "    pipe.init_cross_kv()\n"
-                "或传入自定义 context：\n"
-                "    pipe.init_cross_kv(context_tensor=your_context_tensor)"
+                "Cross-Attention KV not initialized. Please call __call__ only after:\n"
+                " pipe.init_cross_kv()\n"
+                "Or provide a custom context:\n"
+                " pipe.init_cross_kv(context_tensor=your_context_tensor)"
             )
+        
+        if isinstance(LQ_video, types.GeneratorType):
+            lq_buffer = FrameStreamBuffer(LQ_video, buffer_size=buffer_size, device=self.device, dtype=self.torch_dtype)
+            is_stream_input = True
+        elif isinstance(LQ_video, torch.Tensor):
+            lq_buffer = TensorAsBuffer(LQ_video)
+            is_stream_input = False
+        else:
+            raise TypeError(f"LQ_video must be torch.Tensor or Generator，But get {type(LQ_video)}")
 
         # 尺寸修正
         height, width = self.check_resize_height_width(height, width)
@@ -348,6 +361,8 @@ class FlashVSRTinyLongPipeline(BasePipeline):
             noise = self.generate_noise((1, 16, (num_frames - 1) // 4 + 1, height//8, width//8), seed=seed, device=self.device, dtype=self.torch_dtype)
         # noise = noise.to(dtype=self.torch_dtype, device=self.device)
         latents = noise
+        
+        writer = imageio.get_writer(output_path, fps=fps, quality=quality)
 
         process_total_num = (num_frames - 1) // 8 - 2
         is_stream = True
@@ -360,97 +375,105 @@ class FlashVSRTinyLongPipeline(BasePipeline):
         LQ_pre_idx = 0
         LQ_cur_idx = 0
         self.TCDecoder.clean_mem()
-
-        with torch.no_grad():
-            for cur_process_idx in progress_bar_cmd(range(process_total_num)):
-                if cur_process_idx == 0:
-                    pre_cache_k = [None] * len(self.dit.blocks)
-                    pre_cache_v = [None] * len(self.dit.blocks)
-                    LQ_latents = None
-                    inner_loop_num = 7
-                    for inner_idx in range(inner_loop_num):
-                        cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :].to(self.device)
-                        ) if LQ_video is not None else None
-                        if cur is None:
-                            continue
-                        if LQ_latents is None:
-                            LQ_latents = cur
-                        else:
-                            for layer_idx in range(len(LQ_latents)):
-                                LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
-                    LQ_cur_idx = (inner_loop_num-1)*4-3
-                    cur_latents = latents[:, :, :6, :, :]
-                else:
-                    LQ_latents = None
-                    inner_loop_num = 2
-                    for inner_idx in range(inner_loop_num):
-                        cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, cur_process_idx*8+17+inner_idx*4:cur_process_idx*8+21+inner_idx*4, :, :].to(self.device)
-                        ) if LQ_video is not None else None
-                        if cur is None:
-                            continue
-                        if LQ_latents is None:
-                            LQ_latents = cur
-                        else:
-                            for layer_idx in range(len(LQ_latents)):
-                                LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
-                    LQ_cur_idx = cur_process_idx*8+21+(inner_loop_num-2)*4
-                    cur_latents = latents[:, :, 4+cur_process_idx*2:6+cur_process_idx*2, :, :]
+        try:
+            with torch.no_grad():
+                for cur_process_idx in progress_bar_cmd(range(process_total_num)):
+                    if cur_process_idx == 0:
+                        pre_cache_k = [None] * len(self.dit.blocks)
+                        pre_cache_v = [None] * len(self.dit.blocks)
+                        LQ_latents_list = []
+                        inner_loop_num = 7
+                        for inner_idx in range(inner_loop_num):
+                            start, end = max(0, inner_idx * 4 - 3), (inner_idx + 1) * 4 - 3
+                            lq_chunk = lq_buffer.get_chunk(start, end)
+                            
+                            cur = self.denoising_model().LQ_proj_in.stream_forward(lq_chunk)
+                            if cur is None:
+                                continue
+                            LQ_latents_list.append(cur)
                         
-                # 推理（无 motion_controller / vace）
-                noise_pred_posi, pre_cache_k, pre_cache_v = model_fn_wan_video(
-                    self.dit,
-                    x=cur_latents,
-                    timestep=self.timestep,
-                    context=None,
-                    tea_cache=None,
-                    use_unified_sequence_parallel=False,
-                    LQ_latents=LQ_latents,
-                    is_full_block=is_full_block,
-                    is_stream=is_stream,
-                    pre_cache_k=pre_cache_k,
-                    pre_cache_v=pre_cache_v,
-                    topk_ratio=topk_ratio,
-                    kv_ratio=kv_ratio,
-                    cur_process_idx=cur_process_idx,
-                    t_mod=self.t_mod,
-                    t=self.t,
-                    local_range = local_range,
-                )
-
-                # 更新 latent
-                cur_latents = cur_latents - noise_pred_posi
-                
-                # Decode
-                cur_LQ_frame = LQ_video[:,:,LQ_pre_idx:LQ_cur_idx,:,:].to(self.device)
-                cur_frames = self.TCDecoder.decode_video(
-                    cur_latents.transpose(1, 2),
-                    parallel=False,
-                    show_progress_bar=False,
-                    cond=cur_LQ_frame).transpose(1, 2).mul_(2).sub_(1)
-
-                # 颜色校正（wavelet）
-                try:
-                    if color_fix:
-                        cur_frames = self.ColorCorrector(
-                            cur_frames.to(device=self.device),
-                            cur_LQ_frame,
-                            clip_range=(-1, 1),
-                            chunk_size=None,
-                            method='adain'
-                        )
-                except:
-                    pass
-                
-                frames_total.append(cur_frames.to('cpu'))
-                LQ_pre_idx = LQ_cur_idx
-                
-                del cur_frames, cur_latents, cur_LQ_frame
-                clean_vram()
+                        # 合并 LQ latents
+                        LQ_latents = [torch.cat([l[i] for l in LQ_latents_list], dim=1) for i in range(len(LQ_latents_list[0]))]
+                        LQ_cur_idx = (inner_loop_num - 1) * 4 - 3
+                        cur_latents = latents[:, :, :6, :, :]
+                    else:
+                        LQ_latents_list = []
+                        inner_loop_num = 2
+                        for inner_idx in range(inner_loop_num):
+                            start = cur_process_idx * 8 + 17 + inner_idx * 4
+                            end = cur_process_idx * 8 + 21 + inner_idx * 4
+                            lq_chunk = lq_buffer.get_chunk(start, end)
+                            
+                            cur = self.denoising_model().LQ_proj_in.stream_forward(lq_chunk)
+                            if cur is None:
+                                continue
+                            LQ_latents_list.append(cur)
+                        
+                        LQ_latents = [torch.cat([l[i] for l in LQ_latents_list], dim=1) for i in range(len(LQ_latents_list[0]))]
+                        LQ_cur_idx = cur_process_idx * 8 + 21 + (inner_loop_num - 2) * 4
+                        cur_latents = latents[:, :, 4 + cur_process_idx * 2 : 6 + cur_process_idx * 2, :, :]
+                    
+                    # 推理（无 motion_controller / vace）
+                    noise_pred_posi, pre_cache_k, pre_cache_v = model_fn_wan_video(
+                        self.dit,
+                        x=cur_latents,
+                        timestep=self.timestep,
+                        context=None,
+                        tea_cache=None,
+                        use_unified_sequence_parallel=False,
+                        LQ_latents=LQ_latents,
+                        is_full_block=is_full_block,
+                        is_stream=is_stream,
+                        pre_cache_k=pre_cache_k,
+                        pre_cache_v=pre_cache_v,
+                        topk_ratio=topk_ratio,
+                        kv_ratio=kv_ratio,
+                        cur_process_idx=cur_process_idx,
+                        t_mod=self.t_mod,
+                        t=self.t,
+                        local_range = local_range,
+                    )
+    
+                    # 更新 latent
+                    cur_latents = cur_latents - noise_pred_posi
+                    
+                    # Decode
+                    cur_LQ_frame = lq_buffer.get_chunk(LQ_pre_idx, LQ_cur_idx).to(self.device)
+                    cur_frames = self.decode_video(cur_latents, cond=cur_LQ_frame)
+    
+                    # 颜色校正（wavelet）
+                    try:
+                        if color_fix:
+                            cur_frames = self.ColorCorrector(
+                                cur_frames.to(device=self.device),
+                                cur_LQ_frame,
+                                clip_range=(-1, 1),
+                                chunk_size=None,
+                                method='adain'
+                            )
+                    except:
+                        pass
+                    
+                    num_frames_in_chunk = cur_frames.shape[2]
+                    for i in range(num_frames_in_chunk):
+                        single_frame_tensor = cur_frames[0, :, i, :, :]
+                        imageio_frame = tensor_to_imageio_frame(single_frame_tensor)
+                        writer.append_data(imageio_frame)
+                    
+                    LQ_pre_idx = LQ_cur_idx
+                    
+                    del cur_frames, cur_latents, cur_LQ_frame, LQ_latents
+                    if 'LQ_latents_list' in locals(): del LQ_latents_list
+                    clean_vram()
+    
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
+                    
+        finally:
+            writer.close()
             
-            frames = torch.cat(frames_total, dim=2)
-        return frames[0]
+        return True
 
 
 # -----------------------------

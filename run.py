@@ -19,30 +19,9 @@ parser.add_argument("-t", "--dtype", type=str, default="bf16", choices=["fp16", 
 parser.add_argument("-d", "--device", type=str, default="auto", help="Device to run FlashVSR")
 parser.add_argument("-f", "--fps", type=int, default=30, help="Output FPS (for image sequences only), default=30")
 parser.add_argument("-q", "--quality", type=int, default=6, help="Output video quality, default=6")
+parser.add_argument("-a", "--attention", default="sage", choices=["sage", "block"], help="Attention mode, default=sage")
 parser.add_argument("output_folder", type=str, help="Path to save output video")
 args = parser.parse_args()
-print("[FlashVSR] Preparing dependencies......")
-
-import os
-import re
-import math
-import torch
-import shutil
-import imageio
-import ffmpeg
-import numpy as np
-import torch.nn.functional as F
-
-from PIL import Image
-from tqdm import tqdm
-from einops import rearrange
-from huggingface_hub import snapshot_download
-from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
-from src.models.TCDecoder import build_tcdecoder
-from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj
-
-root = os.path.dirname(os.path.abspath(__file__))
-devices = get_device_list()
 
 def log(message:str, message_type:str="normal"):
     if message_type == 'error':
@@ -56,6 +35,32 @@ def log(message:str, message_type:str="normal"):
     else:
         message = message
     print(f"{message}")
+
+from tqdm import tqdm
+log("[FlashVSR] Preparing dependencies...", message_type="finish")
+
+import os
+import re
+import math
+import uuid
+import torch
+import shutil
+import imageio
+import ffmpeg
+import numpy as np
+import torch.nn.functional as F
+
+from PIL import Image
+from einops import rearrange
+from huggingface_hub import snapshot_download
+from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
+from src.models import wan_video_dit
+from src.models.TCDecoder import build_tcdecoder
+from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj
+
+root = os.path.dirname(os.path.abspath(__file__))
+temp = os.path.join(root, "_temp")
+devices = get_device_list()
 
 def model_downlod(model_name="JunhaoZhuang/FlashVSR"):
     model_dir = os.path.join(root, "models", "FlashVSR")
@@ -220,6 +225,35 @@ def prepare_tensors(path: str, dtype=torch.bfloat16):
     
     raise ValueError(f"Unsupported input: {path}")
 
+def get_input_params(image_tensor, scale):
+    N0, h0, w0, _ = image_tensor.shape
+    
+    multiple = 128
+    sW, sH, tW, tH = compute_scaled_and_target_dims(w0, h0, scale=scale, multiple=multiple)
+    num_frames_with_padding = N0 + 4
+    F = largest_8n1_leq(num_frames_with_padding)
+    
+    if F == 0:
+        raise RuntimeError(f"Not enough frames after padding. Got {num_frames_with_padding}.")
+    
+    return tH, tW, F
+
+def input_tensor_generator(image_tensor: torch.Tensor, device, scale: int = 4, dtype=torch.bfloat16):
+    """
+    一个生成器函数，逐帧处理并 yield 准备好的帧张量，以节省内存。
+    产出的每个张量形状为 (C, H, W)。
+    """
+    N0, h0, w0, _ = image_tensor.shape
+    tH, tW, F = get_input_params(image_tensor, scale)
+        
+    for i in range(F):
+        frame_idx = min(i, N0 - 1)
+        frame_slice = image_tensor[frame_idx].to(device)
+        tensor_chw = tensor_upscale_then_center_crop(frame_slice, scale=scale, tW=tW, tH=tH)
+        tensor_out = tensor_chw * 2.0 - 1.0
+        del tensor_chw
+        yield tensor_out.to('cpu').to(dtype)
+
 def prepare_input_tensor(image_tensor: torch.Tensor, device, scale: int = 4, dtype=torch.bfloat16):
     N0, h0, w0, _ = image_tensor.shape
     
@@ -272,6 +306,19 @@ def calculate_tile_coords(height, width, tile_size, overlap):
             
     return coords
 
+def create_feather_mask_numpy(size, overlap):
+    H, W = size
+    mask = np.ones((H, W, 1), dtype=np.float32)
+    ramp = np.linspace(0, 1, overlap, dtype=np.float32)
+    
+    mask[:, :overlap, :] *= ramp[np.newaxis, :, np.newaxis]
+    mask[:, -overlap:, :] *= np.flip(ramp)[np.newaxis, :, np.newaxis]
+    
+    mask[:overlap, :, :] *= ramp[:, np.newaxis, np.newaxis]
+    mask[-overlap:, :, :] *= np.flip(ramp)[:, np.newaxis, np.newaxis]
+    
+    return mask
+
 def create_feather_mask(size, overlap):
     H, W = size
     mask = torch.ones(1, 1, H, W)
@@ -284,6 +331,112 @@ def create_feather_mask(size, overlap):
     mask[:, :, -overlap:, :] = torch.minimum(mask[:, :, -overlap:, :], ramp.flip(0).view(1, 1, -1, 1))
     
     return mask
+
+def stitch_video_tiles(
+    tile_paths, 
+    tile_coords, 
+    final_dims, 
+    scale, 
+    overlap, 
+    output_path, 
+    fps, 
+    quality, 
+    cleanup=True,
+    chunk_size=40  # --- 新增参数：每次在内存中处理的帧数 ---
+):
+    if not tile_paths:
+        log("No tile videos found to stitch.", message_type='error')
+        return
+    
+    final_W, final_H = final_dims
+    
+    # 1. 一次性打开所有视频文件
+    readers = [imageio.get_reader(p) for p in tile_paths]
+    
+    try:
+        # 获取总帧数
+        num_frames = readers[0].count_frames()
+        if num_frames is None or num_frames <= 0:
+            num_frames = len([_ for _ in readers[0]])
+            for r in readers: r.close()
+            readers = [imageio.get_reader(p) for p in tile_paths]
+            
+        # 打开最终的写入器
+        with imageio.get_writer(output_path, fps=fps, quality=quality) as writer:
+            
+            # 2. 按 chunk_size 遍历所有帧
+            # tqdm 现在描述的是处理了多少个“块”
+            for start_frame in tqdm(range(0, num_frames, chunk_size), desc="[FlashVSR] Stitching Chunks"):
+                end_frame = min(start_frame + chunk_size, num_frames)
+                current_chunk_size = end_frame - start_frame
+                
+                # 3. 为整个“块”在内存中创建画布
+                # 形状: (Frames, Height, Width, Channels)
+                chunk_canvas = np.zeros((current_chunk_size, final_H, final_W, 3), dtype=np.float32)
+                weight_canvas = np.zeros_like(chunk_canvas, dtype=np.float32)
+                
+                # 4. 遍历每个分块视频 (tile)
+                for i, reader in enumerate(readers):
+                    # 5. 一次性读取这个 tile 在当前 chunk 中的所有帧
+                    # 这是利用顺序读取的关键优化
+                    try:
+                        # get_reader().iter_data() 是高效读取连续帧的方式
+                        tile_chunk_frames = [
+                            frame.astype(np.float32) / 255.0 
+                            for idx, frame in enumerate(reader.iter_data()) 
+                            if start_frame <= idx < end_frame
+                        ]
+                        # 将帧列表转换为一个 NumPy 数组
+                        tile_chunk_np = np.stack(tile_chunk_frames, axis=0)
+                    except Exception as e:
+                        log(f"Warning: Could not read chunk from tile {i}. Error: {e}", message_type='warning')
+                        continue
+                    
+                    if tile_chunk_np.shape[0] != current_chunk_size:
+                        log(f"Warning: Tile {i} chunk has incorrect frame count. Skipping.", message_type='warning')
+                        continue
+                    
+                    # 6. 创建羽化蒙版 (只需要创建一次)
+                    tile_H, tile_W, _ = tile_chunk_np.shape[1:]
+                    ramp = np.linspace(0, 1, overlap * scale, dtype=np.float32)
+                    mask = np.ones((tile_H, tile_W, 1), dtype=np.float32)
+                    mask[:, :overlap*scale, :] *= ramp[np.newaxis, :, np.newaxis]
+                    mask[:, -overlap*scale:, :] *= np.flip(ramp)[np.newaxis, :, np.newaxis]
+                    mask[:overlap*scale, :, :] *= ramp[:, np.newaxis, np.newaxis]
+                    mask[-overlap*scale:, :, :] *= np.flip(ramp)[:, np.newaxis, np.newaxis]
+                    # 扩展蒙版以匹配 chunk 的帧数维度
+                    mask_4d = mask[np.newaxis, :, :, :] # 形状: (1, H, W, C)
+                    
+                    # 7. 在内存中拼接整个 chunk
+                    x1_orig, y1_orig, _, _ = tile_coords[i]
+                    out_y1, out_x1 = y1_orig * scale, x1_orig * scale
+                    out_y2, out_x2 = out_y1 + tile_H, out_x1 + tile_W
+                    
+                    # 使用 NumPy 的广播机制 (broadcasting)
+                    chunk_canvas[:, out_y1:out_y2, out_x1:out_x2, :] += tile_chunk_np * mask_4d
+                    weight_canvas[:, out_y1:out_y2, out_x1:out_x2, :] += mask_4d
+                    
+                # 8. 归一化整个 chunk
+                weight_canvas[weight_canvas == 0] = 1.0
+                stitched_chunk = chunk_canvas / weight_canvas
+                
+                # 9. 将这个 chunk 的所有帧一次性写入文件
+                for frame_idx_in_chunk in range(current_chunk_size):
+                    frame_uint8 = (np.clip(stitched_chunk[frame_idx_in_chunk], 0, 1) * 255).astype(np.uint8)
+                    writer.append_data(frame_uint8)
+                    
+    finally:
+        log("Closing all tile reader instances...")
+        for reader in readers:
+            reader.close()
+            
+    if cleanup:
+        log("Cleaning up temporary tile files...")
+        for path in tile_paths:
+            try:
+                os.remove(path)
+            except OSError as e:
+                log(f"Could not remove temporary file '{path}': {e}", message_type='warning')
 
 def init_pipeline(mode, device, dtype):
     model_downlod()
@@ -332,7 +485,7 @@ def init_pipeline(mode, device, dtype):
     
     return pipe
 
-def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, dtype, sparse_ratio=2, kv_ratio=3, local_range=11, seed=0, device="auto"):
+def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, dtype, sparse_ratio=2, kv_ratio=3, local_range=11, seed=0, device="auto", quality=6, output=None):
     _device = device
     if device == "auto":
         _device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else device
@@ -345,40 +498,61 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
         raise ValueError('The "tile_overlap" must be less than half of "tile_size"!')
     
     frames, fps = prepare_tensors(input, dtype=dtype)
+    _fps = fps if is_video(input) else args.fps
     
     if frames.shape[0] < 21:
         raise ValueError(f"Number of frames must be at least 21, got {frames.shape[0]}")
+    log("[FlashVSR] Preparing frames...", message_type="finish")
     
     if tiled_dit:
-        log("[FlashVSR] Preparing frames...")
         N, H, W, C = frames.shape
         num_aligned_frames = largest_8n1_leq(N + 4) - 4
         
-        final_output_canvas = torch.zeros(
-            (num_aligned_frames, H * scale, W * scale, C), 
-            dtype=torch.float32, 
-            device="cpu"
-        )
-        weight_sum_canvas = torch.zeros_like(final_output_canvas)
+        if mode == "tiny-long":
+            local_temp = os.path.join(temp, str(uuid.uuid4()))
+            os.makedirs(local_temp, exist_ok=True)
+        else:
+            final_output_canvas = torch.zeros(
+                (num_aligned_frames, H * scale, W * scale, C), 
+                dtype=torch.float32, 
+                device="cpu"
+            )
+            weight_sum_canvas = torch.zeros_like(final_output_canvas)
+            
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
         latent_tiles_cpu = []
+        temp_videos = []
         
         pipe = init_pipeline(mode, _device, dtype)
         
         for i, (x1, y1, x2, y2) in enumerate(tile_coords):
-            log(f"[FlashVSR] Processing tile {i+1}/{len(tile_coords)}: coords ({x1},{y1}) to ({x2},{y2})", message_type='info')
             input_tile = frames[:, y1:y2, x1:x2, :]
-            
-            LQ_tile, th, tw, F = prepare_input_tensor(input_tile, _device, scale=scale, dtype=dtype)
-            if "long" not in mode:
+                
+            if mode == "tiny-long":
+                temp_name = os.path.join(local_temp, f"{i+1:05d}.mp4") 
+                th, tw, F = get_input_params(input_tile, scale=scale)
+                LQ_tile = input_tensor_generator(input_tile, _device, scale=scale, dtype=dtype)
+            else:
+                LQ_tile, th, tw, F = prepare_input_tensor(input_tile, _device, scale=scale, dtype=dtype)
                 LQ_tile = LQ_tile.to(_device)
+            
+            if i == 0:
+                log(f"[FlashVSR] Processing {frames.shape[0]} frames...", message_type='info')
+            log(f"[FlashVSR] Processing tile {i+1}/{len(tile_coords)}: ({x1},{y1}) to ({x2},{y2})", message_type='info')
             
             output_tile_gpu = pipe(
                 prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
                 LQ_video=LQ_tile, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
                 topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-                color_fix=color_fix, unload_dit=unload_dit
+                color_fix=color_fix, unload_dit=unload_dit, fps=_fps, quality=10, output_path=temp_name, tiled_dit=True
             )
+            
+            temp_videos.append(temp_name)
+            if mode == "tiny-long":
+                final_output = output_tile_gpu
+                del LQ_tile, input_tile
+                clean_vram()
+                continue
             
             processed_tile_cpu = tensor2video(output_tile_gpu).to("cpu")
             
@@ -397,26 +571,39 @@ def main(input, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_ov
             
             del LQ_tile, output_tile_gpu, processed_tile_cpu, input_tile
             clean_vram()
-            
-        weight_sum_canvas[weight_sum_canvas == 0] = 1.0
-        final_output = final_output_canvas / weight_sum_canvas
-    else:
-        log("[FlashVSR] Preparing frames...")
-        LQ, th, tw, F = prepare_input_tensor(frames, _device, scale=scale, dtype=dtype)
-        if "long" not in mode:
-            LQ = LQ.to(_device)
         
+        if mode == "tiny-long":
+            stitch_video_tiles(tile_paths=temp_videos, tile_coords=tile_coords, final_dims=(W * scale, H * scale),
+                scale=scale, overlap=tile_overlap, output_path=output, fps=_fps, quality=quality, cleanup=True
+            )
+            shutil.rmtree(local_temp)
+        else:
+            weight_sum_canvas[weight_sum_canvas == 0] = 1.0
+            final_output = final_output_canvas / weight_sum_canvas
+    else:
+        if mode == "tiny-long":
+            th, tw, F = get_input_params(frames, scale=scale)
+            LQ = input_tensor_generator(frames, _device, scale=scale, dtype=dtype)
+        else:
+            LQ, th, tw, F = prepare_input_tensor(frames, _device, scale=scale, dtype=dtype)
+            LQ = LQ.to(_device)
+
         pipe = init_pipeline(mode, _device, dtype)
         log(f"[FlashVSR] Processing {frames.shape[0]} frames...", message_type='info')
         video = pipe(
             prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
             LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
             topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-            color_fix = color_fix, unload_dit=unload_dit
+            color_fix = color_fix, unload_dit=unload_dit, fps=_fps, output_path=output, tiled_dit=True
         )
+        
+        if mode == "tiny-long":
+            del pipe, LQ
+            clean_vram()
+            return video, _fps
+        
         log("[FlashVSR] Preparing frames...")
         final_output = tensor2video(video).to("cpu")
-        
         del pipe, video, LQ
         clean_vram()
     
@@ -432,14 +619,22 @@ if __name__ == "__main__":
         dtype = dtype_map[args.dtype]
     except:
         dtype = torch.bfloat16
+        
+    if args.attention == "sage":
+        wan_video_dit.USE_BLOCK_ATTN = False
+    else:
+        wan_video_dit.USE_BLOCK_ATTN = True
     
     model_downlod()
-    result, fps = main(args.input, args.mode, args.scale, args.color_fix, args.tiled_vae, args.tiled_dit,
-        args.tile_size, args.overlap, args.unload_dit, dtype, seed=args.seed, device=args.device)
-    
-    _fps = fps if is_video(args.input) else args.fps
+    if os.path.exists(temp):
+        shutil.rmtree(temp)
+    os.makedirs(temp, exist_ok=True)
     name = os.path.basename(args.input.rstrip('/'))
     final = os.path.join(args.output_folder, f"FlashVSR_{args.mode}_{name.split('.')[0]}_{args.seed}.mp4")
-    save_video(result, final, fps=_fps, quality=args.quality)
+    result, fps = main(args.input, args.mode, args.scale, args.color_fix, args.tiled_vae, args.tiled_dit,args.tile_size,
+        args.overlap, args.unload_dit, dtype, seed=args.seed, device=args.device, quality=args.quality, output=final)
+    if args.mode != "tiny-long":
+        save_video(result, final, fps=fps, quality=args.quality)
+        
     merge_video_with_audio(final, args.input)
     log("[FlashVSR] Done.", message_type='finish')

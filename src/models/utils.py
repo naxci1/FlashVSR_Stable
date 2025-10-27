@@ -4,9 +4,11 @@ from contextlib import contextmanager
 from einops import rearrange, repeat
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
 import time
 import hashlib
+import types
+from collections import deque
+import numpy as np
 
 CACHE_T = 2
 
@@ -361,4 +363,65 @@ class Buffer_LQ4x_Proj(nn.Module):
                 outputs.append(self.linear_layers[i](out_x))
             self.clip_idx += 1
             return outputs
+
+class FrameStreamBuffer:
+    def __init__(self, frame_generator: types.GeneratorType, buffer_size: int = 60, device='cpu', dtype=torch.float16):
+        self.generator = frame_generator
+        self.buffer_size = buffer_size
+        self.device = device
+        self.dtype = dtype
         
+        self.buffer = deque()
+        self.start_frame_index = 0
+        self._fill_buffer(initial_fill_count=self.buffer_size)
+        
+    def _fill_buffer(self, initial_fill_count: int):
+        try:
+            for _ in range(initial_fill_count):
+                frame = next(self.generator)
+                self.buffer.append(frame)
+        except StopIteration:
+            pass
+            
+    def get_chunk(self, start: int, end: int) -> torch.Tensor:
+        if start < self.start_frame_index:
+            raise IndexError(f"Start frame {start} has already been discarded (current buffer starts at {self.start_frame_index})")
+
+        while end > self.start_frame_index + len(self.buffer):
+            try:
+                self.buffer.append(next(self.generator))
+            except StopIteration:
+                if end > self.start_frame_index + len(self.buffer):
+                    print(f"End frame {end} is out of range! It will be truncated to {self.start_frame_index + len(self.buffer)}")
+                    end = self.start_frame_index + len(self.buffer)
+                break
+
+        while len(self.buffer) > self.buffer_size:
+            self.buffer.popleft()
+            self.start_frame_index += 1
+
+        relative_start = start - self.start_frame_index
+        relative_end = end - self.start_frame_index
+
+        chunk_list = [self.buffer[i] for i in range(relative_start, relative_end)]
+        if not chunk_list:
+            C, H, W = self.buffer[0].shape
+            return torch.empty((1, C, 0, H, W), device=self.device, dtype=self.dtype)
+
+        chunk_tensor = torch.stack(chunk_list, dim=1) # (C, chunk_len, H, W)
+        return chunk_tensor.unsqueeze(0).to(device=self.device) # (1, C, chunk_len, H, W)
+
+class TensorAsBuffer:
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor = tensor
+        
+    def get_chunk(self, start: int, end: int) -> torch.Tensor:
+        return self.tensor[:, :, start:end, :, :]
+
+def tensor_to_imageio_frame(frame_tensor: torch.Tensor) -> np.ndarray:
+    img_tensor = (frame_tensor + 1.0) / 2.0
+    img_tensor_hwc = img_tensor.permute(1, 2, 0)
+    img_tensor_hwc_u8 = (img_tensor_hwc * 255.0).clamp(0, 255).to(torch.uint8)
+    img_np = img_tensor_hwc_u8.cpu().numpy()
+    
+    return img_np

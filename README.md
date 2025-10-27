@@ -40,10 +40,10 @@ cd FlashVSR_plus
 
 #### 2️⃣ Set Up the Python Environment
 
-Create and activate the environment (**Python 3.11.13**):
+Create and activate the environment:
 
 ```bash
-conda create -n flashvsr python=3.11.13
+conda create -n flashvsr
 conda activate flashvsr
 ```
 
@@ -71,46 +71,15 @@ pip install -r requirements.txt
 
 #### 4️⃣ Run Inference
 
-For example:
+CLI example:
 
 ```bash
 python run.py -i ./inputs/example0.mp4 -s 4 ./
 ```
-
-Or you can run:
+Or use gradio web ui:  
 
 ```bash
-python run.py -h
-
-usage: run.py [-h] [-i INPUT] [-s SCALE] [-m {tiny,full}] [--tiled-vae] [--tiled-dit] [--tile-size TILE_SIZE]
-              [--overlap OVERLAP] [--unload-dit] [--color-fix] [--seed SEED] [-t {fp16,bf16}] [-d DEVICE]
-              output_folder
-
-FlashVSR+: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution.
-
-positional arguments:
-  output_folder         Path to save output video
-
-options:
-  -h, --help            show this help message and exit
-  -i INPUT, --input INPUT
-                        Path to video file or folder of images
-  -s SCALE, --scale SCALE
-                        Upscale factor, default=4
-  -m {tiny,full}, --mode {tiny,full}
-                        The type of pipeline to use, default=tiny
-  --tiled-vae           Enable tile decoding
-  --tiled-dit           Enable tile inference
-  --tile-size TILE_SIZE
-                        Chunk size of tile inference, default=256
-  --overlap OVERLAP     Overlap size of tile inference, default=24
-  --unload-dit          Unload DiT before decoding
-  --color-fix           Correct output video color
-  --seed SEED           Random Seed, default=0
-  -t {fp16,bf16}, --dtype {fp16,bf16}
-                        Data type for processing, default=bf16
-  -d DEVICE, --device DEVICE
-                        Device to run FlashVSR
+python webui.py
 ```
 
 ---
