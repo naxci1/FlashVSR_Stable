@@ -4,7 +4,7 @@
 
 **Authors:** Junhao Zhuang, Shi Guo, Xin Cai, Xiaohui Li, Yihao Liu, Chun Yuan, Tianfan Xue
 
-**Modified:** lihaoyun6  
+**Modified:** naxci1  
 
 <a href='http://zhuang2002.github.io/FlashVSR'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
 <a href="https://huggingface.co/JunhaoZhuang/FlashVSR"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue"></a> &nbsp;
@@ -34,8 +34,8 @@ Follow these steps to set up and run **FlashVSR** on your local machine:
 #### 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/lihaoyun6/FlashVSR_plus
-cd FlashVSR_plus
+git clone https://github.com/naxci1/FlashVSR_Stable
+cd FlashVSR_Stable
 ````
 
 #### 2️⃣ Set Up the Python Environment
@@ -78,15 +78,74 @@ pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu1
 CLI example:
 
 ```bash
-python run.py -i ./inputs/example0.mp4 -s 4 ./
-```
-Or use gradio web ui:  
+python run.py -i "C:\video\input" -o "C:\video\output" -s 4 -m full --tiled-vae --tiled-dit --tile-size 256 --overlap 24 --color-fix -t bf16 --batch-size 100
 
-```bash
-python webui.py
+python run.py -i "C:\video\input" -o "C:\video\output" -s 2 -m full --tiled-vae --tiled-dit --tile-size 256 --overlap 24 --color-fix -t bf16  --batch-size 30 
+
+python run.py -i "C:\video\input" -o "C:\video\output" -s 2 -m full --tiled-vae --tiled-dit --tile-size 368 --overlap 24 --color-fix -t bf16  --batch-size 200
+
+python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tiled-vae --tiled-dit --tile-size 256 --overlap 24 --color-fix -t bf16 --max-frames 100 --batch-size 100
+
+python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tiled-vae --tiled-dit --tile-size 128 --overlap 24 --color-fix -t bf16
+
 ```
 
 ---
+
+# 🧠 FlashVSR+ Commandline Usage
+
+## Usage
+
+```bash
+python run.py [-h]
+   -i INPUT
+   -o OUTPUT_FOLDER
+   [-s SCALE]
+   [-m {tiny,tiny-long,full}]
+   [--tiled-vae]
+   [--tiled-dit]
+   [--tile-size TILE_SIZE]
+   [--overlap OVERLAP]
+   [--unload-dit]
+   [--color-fix]
+   [--seed SEED]
+   [-t {fp16,bf16}]
+   [-d DEVICE]
+   [-f FPS]
+   [--qp QP]
+   [-a {sage,block}]
+   [--max-frames MAX_FRAMES]
+   [--batch-size BATCH_SIZE]
+```
+
+---
+
+## Options
+
+| Argument | Description |
+|-----------|--------------|
+| `-h, --help` | Show this help message and exit |
+| `-i, --input` | **Path to input video file** or folder of images/videos *(required)* |
+| `-o, --output_folder` | **Path to save processed output video(s)** *(required)* |
+| `-s, --scale` | Upscale factor (default: **4**) |
+| `-m, --mode` | Processing mode: `{tiny, tiny-long, full}` (default: **tiny**) |
+| `--tiled-vae` | Enable **tiled VAE decoding** to reduce VRAM usage |
+| `--tiled-dit` | Enable **tiled DiT inference** for high-resolution videos |
+| `--tile-size TILE_SIZE` | Tile size for tiled inference (default: **256**) |
+| `--overlap OVERLAP` | Overlap size between tiles (default: **24**) |
+| `--unload-dit` | Unload DiT before decoding to save VRAM |
+| `--color-fix` | Apply color correction to the final video output |
+| `--seed` | Random seed for reproducibility (default: **0**) |
+| `-t, --dtype` | Data precision: `{fp16, bf16}` (default: **bf16**) |
+| `-d, --device` | Compute device (e.g. `'cuda'`, `'cuda:0'`, `'mps'`, `'cpu'`) |
+| `-f, --fps` | Output FPS for image sequences (default: **30**) |
+| `--qp` | Quantization Parameter for AV1 encoder (0–51, lower = higher quality, default: **13**) |
+| `-a, --attention` | Attention mechanism: `{sage, block}` (default: **sage**) |
+| `--max-frames` | Limit maximum number of frames to process from the start |
+| `--batch-size` | Process the video in chunks of this many frames |
+
+---
+
 
 ### 🤗 Feedback & Support
 
@@ -105,23 +164,3 @@ We gratefully acknowledge the following open-source projects:
 
 ---
 
-### 📞 Contact
-
-* **Junhao Zhuang**
-  Email: [zhuangjh23@mails.tsinghua.edu.cn](mailto:zhuangjh23@mails.tsinghua.edu.cn)
-
----
-
-### 📜 Citation
-
-```bibtex
-@misc{zhuang2025flashvsrrealtimediffusionbasedstreaming,
-      title={FlashVSR: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution}, 
-      author={Junhao Zhuang and Shi Guo and Xin Cai and Xiaohui Li and Yihao Liu and Chun Yuan and Tianfan Xue},
-      year={2025},
-      eprint={2510.12747},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2510.12747}, 
-}
-```
