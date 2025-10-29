@@ -95,7 +95,58 @@ python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tile
 
 
 ---
+### Commandline Usage ###
 
+```bash
+python run.py [-h]
+   -i INPUT
+   -o OUTPUT_FOLDER
+   [-s SCALE]
+   [-m {tiny,tiny-long,full}]
+   [--tiled-vae]
+   [--tiled-dit]
+   [--tile-size TILE_SIZE]
+   [--overlap OVERLAP]
+   [--unload-dit]
+   [--color-fix]
+   [--seed SEED]
+   [-t {fp16,bf16}]
+   [-d DEVICE]
+   [-f FPS]
+   [--qp QP]
+   [-a {sage,block}]
+   [--max-frames MAX_FRAMES]
+   [--batch-size BATCH_SIZE]
+```
+
+---
+
+## Options
+
+| Argument | Description |
+|-----------|--------------|
+| `-h, --help` | Show this help message and exit |
+| `-i, --input` | **Path to input video file** or folder of images/videos *(required)* |
+| `-o, --output_folder` | **Path to save processed output video(s)** *(required)* |
+| `-s, --scale` | Upscale factor (default: **4**) |
+| `-m, --mode` | Processing mode: `{tiny, tiny-long, full}` (default: **tiny**) |
+| `--tiled-vae` | Enable **tiled VAE decoding** to reduce VRAM usage |
+| `--tiled-dit` | Enable **tiled DiT inference** for high-resolution videos |
+| `--tile-size TILE_SIZE` | Tile size for tiled inference (default: **256**) |
+| `--overlap OVERLAP` | Overlap size between tiles (default: **24**) |
+| `--unload-dit` | Unload DiT before decoding to save VRAM |
+| `--color-fix` | Apply color correction to the final video output |
+| `--seed` | Random seed for reproducibility (default: **0**) |
+| `-t, --dtype` | Data precision: `{fp16, bf16}` (default: **bf16**) |
+| `-d, --device` | Compute device (e.g. `'cuda'`, `'cuda:0'`, `'mps'`, `'cpu'`) |
+| `-f, --fps` | Output FPS for image sequences (default: **30**) |
+| `--qp` | Quantization Parameter for AV1 encoder (0–51, lower = higher quality, default: **13**) |
+| `-a, --attention` | Attention mechanism: `{sage, block}` (default: **sage**) |
+| `--max-frames` | Limit maximum number of frames to process from the start |
+| `--batch-size` | Process the video in chunks of this many frames |
+
+
+---
 ### 🤗 Feedback & Support
 
 We welcome feedback and issues. Thank you for trying **FlashVSR_Stable**
