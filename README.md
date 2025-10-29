@@ -21,7 +21,12 @@
 - Replaced `Block-Sparse-Attention` with `Sparse_SageAttention` to avoid building complex cuda kernels.  
 - With the new `tile_dit` method, you can even output 1080P video on 8GB of VRAM.   
 - Support copying audio tracks to output files (powered by FFmpeg). 
-- Introduced Blackwell GPU support for FlashVSR.  
+- Introduced Blackwell GPU support for FlashVSR.
+- Optimized for RTX 5070 Ti 16 GB VRAM and 64+ GB RAM
+- Tested on 1-minute videos. 15 fps, 900 frames.
+- 4x upscale speed is 1.17 FPS.
+- Use only the Full model; the others are low quality and constantly crash.
+- All bugs fixed, code largely rewritten. Optimized for Nvidia 40x and 50x. VRAM usage minimized. Rendered frames transferred to RAM. The final compositing operation (save video) was performed on the CPU, minimizing all OOM errors. 
 
 ---
 ### 🚀 Getting Started
@@ -36,7 +41,7 @@ Follow these steps to set up and run **FlashVSR** on your local machine:
 #### 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/lihaoyun6/FlashVSR_Stable
+git https://github.com/naxci1/FlashVSR_Stable.git
 cd FlashVSR_Stable
 ````
 
@@ -80,6 +85,8 @@ pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu1
 CLI example:
 
 ```bash
+
+python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tiled-vae --tiled-dit --tile-size 128 --overlap 24 --color-fix -t bf16
 
 python run.py -i "C:\video\input" -o "C:\video\output" -s 2 -m full --tiled-vae --tiled-dit --tile-size 368 --overlap 24 --color-fix -t bf16  --batch-size 200
 
