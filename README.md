@@ -1,10 +1,10 @@
 # ⚡ FlashVSR+
 
-**Optimized inference pipeline based on [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) project**
+**Optimized inference pipeline based on [FlashVSR](https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast) project**
 
 **Authors:** Junhao Zhuang, Shi Guo, Xin Cai, Xiaohui Li, Yihao Liu, Chun Yuan, Tianfan Xue
 
-**Modified:** lihaoyun6  
+**Modified:** Naxci1  
 
 <a href='http://zhuang2002.github.io/FlashVSR'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
 <a href="https://huggingface.co/JunhaoZhuang/FlashVSR"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue"></a> &nbsp;
@@ -31,11 +31,13 @@ Follow these steps to set up and run **FlashVSR** on your local machine:
 > ⚠️ **Note:** This project is primarily designed and optimized for **4× video super-resolution**.  
 > We **strongly recommend** using the **4× SR setting** to achieve better results and stability. ✅
 
+
+
 #### 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/lihaoyun6/FlashVSR_plus
-cd FlashVSR_plus
+git clone https://github.com/lihaoyun6/FlashVSR_Stable
+cd FlashVSR_Stable
 ````
 
 #### 2️⃣ Set Up the Python Environment
@@ -78,19 +80,18 @@ pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu1
 CLI example:
 
 ```bash
-python run.py -i ./inputs/example0.mp4 -s 4 ./
-```
-Or use gradio web ui:  
 
-```bash
-python webui.py
+python run.py -i "C:\video\input" -o "C:\video\output" -s 2 -m full --tiled-vae --tiled-dit --tile-size 368 --overlap 24 --color-fix -t bf16  --batch-size 200
+
+python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tiled-vae --tiled-dit --tile-size 256 --overlap 24 --color-fix -t bf16 --max-frames 100 --batch-size 100
 ```
+
 
 ---
 
 ### 🤗 Feedback & Support
 
-We welcome feedback and issues. Thank you for trying **FlashVSR+**
+We welcome feedback and issues. Thank you for trying **FlashVSR_Stable**
 
 ---
 
@@ -105,23 +106,4 @@ We gratefully acknowledge the following open-source projects:
 
 ---
 
-### 📞 Contact
 
-* **Junhao Zhuang**
-  Email: [zhuangjh23@mails.tsinghua.edu.cn](mailto:zhuangjh23@mails.tsinghua.edu.cn)
-
----
-
-### 📜 Citation
-
-```bibtex
-@misc{zhuang2025flashvsrrealtimediffusionbasedstreaming,
-      title={FlashVSR: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution}, 
-      author={Junhao Zhuang and Shi Guo and Xin Cai and Xiaohui Li and Yihao Liu and Chun Yuan and Tianfan Xue},
-      year={2025},
-      eprint={2510.12747},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2510.12747}, 
-}
-```
