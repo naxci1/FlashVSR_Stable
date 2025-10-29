@@ -1,6 +1,6 @@
-# ⚡ FlashVSR+
+# ⚡ FlashVSR Stable
 
-**Optimized inference pipeline based on [FlashVSR](https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast) project**
+**Optimized inference pipeline based on [FlashVSR+](https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast) project**
 
 **Authors:** Junhao Zhuang, Shi Guo, Xin Cai, Xiaohui Li, Yihao Liu, Chun Yuan, Tianfan Xue
 
