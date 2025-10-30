@@ -1,4 +1,4 @@
-# ⚡ FlashVSR+
+# ⚡ FlashVSR Stable
 
 **Optimized inference pipeline based on [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) project**
 
@@ -21,7 +21,11 @@
 - Replaced `Block-Sparse-Attention` with `Sparse_SageAttention` to avoid building complex cuda kernels.  
 - With the new `tile_dit` method, you can even output 1080P video on 8GB of VRAM.   
 - Support copying audio tracks to output files (powered by FFmpeg). 
-- Introduced Blackwell GPU support for FlashVSR.  
+- Introduced Blackwell GPU support for FlashVSR.
+- Optimized for Nvidia 40x and 50x (tested with 16 GB VRAM)
+- Batch processing mode added, splitting larger files into chunks for more stable execution.
+- All bugs fixed, and most OOM errors resolved.
+- A 1-minute 15 fps video (900 frames) runs without batch processing.
 
 ---
 ### 🚀 Getting Started
@@ -92,7 +96,7 @@ python run.py -i "C:\video\input\split" -o "C:\video\output" -s 4 -m full --tile
 
 ---
 
-# 🧠 FlashVSR+ Commandline Usage
+# 🧠 FlashVSR Stable Commandline Usage
 
 ## Usage
 
@@ -149,18 +153,7 @@ python run.py [-h]
 
 ### 🤗 Feedback & Support
 
-We welcome feedback and issues. Thank you for trying **FlashVSR+**
+We welcome feedback and issues. Thank you for trying **FlashVSR Stable**
 
----
 
-### 📄 Acknowledgments
-
-We gratefully acknowledge the following open-source projects:
-
-* **FlashVSR** — [https://github.com/OpenImagingLab/FlashVSR](https://github.com/OpenImagingLab/FlashVSR)
-* **DiffSynth Studio** — [https://github.com/modelscope/DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
-* **Sparse_SageAttention** — [https://github.com/jt-zhang/Sparse\_SageAttention_API](https://github.com/jt-zhang/Sparse_SageAttention_API)
-* **taehv** — [https://github.com/madebyollin/taehv](https://github.com/madebyollin/taehv)
-
----
 
